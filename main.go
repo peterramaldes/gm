@@ -1,11 +1,12 @@
 package main
 
 import (
-	fmt "fmt"
+	"flag"
+	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"regexp"
+	"strings"
 )
 
 type Measure struct {
@@ -15,53 +16,95 @@ type Measure struct {
 	Bytes     uint64 `json:"bytes"`
 }
 
-var regexLinks = regexp.MustCompile(`<a class="js-navigation-open Link--primary" title="compiler" data-turbo-frame="repo-content-turbo-frame" href=".?">compiler</a>`)
+// TODO: how to get the lines and bytes from the file
+// regexLinesAndBytes = regexp.MustCompile(`<div class="Box-header js-blob-header py-2 pr-2 d-flex flex-shrink-0 flex-md-row flex-items-center">(.*?)</div>`)
+
+var regexLinks = regexp.MustCompile(`<a class="js-navigation-open Link--primary" title="(.*?)" data-turbo-frame="repo-content-turbo-frame" href="(.*?)">(.*?)</a>`)
 
 func main() {
-	http.HandleFunc("/gm", measure)
-	log.Fatal(http.ListenAndServe(":6969", nil))
+	flag.Parse()
+
+	repos := flag.Args()
+	for _, r := range repos {
+		html, _ := extractHtml(r)
+		measure(string(html)) // TODO: ignore errors for now
+	}
 }
 
-func measure(w http.ResponseWriter, r *http.Request) {
-	repo, err := repo(r)
+func measure(html string) (Measure, error) {
+	_, err := extractValues(html)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound) // TODO(Peter): Duplicated Code
-		fmt.Fprintf(w, err.Error())
-		return
+		return Measure{}, err
 	}
 
-	b, err := html(repo)
-	if err != nil {
-		w.WriteHeader(http.StatusNotFound) // TODO(Peter): Duplicated Code
-		fmt.Fprintf(w, err.Error())
-		return
-	}
+	// for _, d := range data {
+	// 	fmt.Printf("d = %+v\n", d)
+	// }
 
-	// TODO(Peter): do the regex thing
-	fmt.Println(regexLinks.FindAll(b, -1))
-	fmt.Fprintf(w, string(b))
+	return Measure{}, nil
 }
 
-func html(repo string) ([]byte, error) {
-	res, err := http.Get(repo)
-	if err != nil {
-		return nil, fmt.Errorf("no such repo: %q\n", repo)
+type Data struct {
+	Path     string
+	Filename string
+	IsDir    bool
+}
+
+func extractValues(html string) ([]Data, error) {
+	var result []Data
+
+	s := regexLinks.FindAllStringSubmatch(html, -1)
+	for _, e := range s {
+		v := e[len(e)-2:]
+
+		data := Data{
+			Path:     v[0],
+			Filename: v[1],
+			IsDir:    strings.Contains(v[0], "/tree/"),
+		}
+
+		result = append(result, data)
+
+		url := fmt.Sprintf("https://github.com%s", data.Path)
+		if data.IsDir {
+			h, err := extractHtml(url)
+			if err != nil {
+				return []Data{}, err
+			}
+
+			data, err := extractValues(h)
+			if err != nil {
+				return []Data{}, err
+			}
+
+			result = append(result, data...)
+		} else {
+			s, err := extractHtml(url)
+			if err != nil {
+				return []Data{}, err
+			}
+
+			b := regexLinesAndBytes.FindAllStringSubmatch(s, -1)
+			fmt.Printf("b = %+v\n", b)
+		}
 	}
+
+	return result, nil
+}
+
+func extractHtml(url string) (string, error) {
+	res, err := http.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("no such repo: %q\n", url)
+	}
+	defer res.Body.Close()
 
 	// TODO(Peter): Handle memory leak, we should do Defer Close here, right?
 
 	b, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil, fmt.Errorf("err trying to read response: %q\n", repo)
+		return "", fmt.Errorf("err trying to read response: %q\n", url)
 	}
 
-	return b, nil
-}
-
-func repo(r *http.Request) (string, error) {
-	repo := r.URL.Query().Get("repo")
-	if len(repo) <= 0 {
-		return "", fmt.Errorf("repo is empty")
-	}
-	return repo, nil
+	return string(b), nil
 }
